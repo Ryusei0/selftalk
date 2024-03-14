@@ -34,7 +34,7 @@ from langchain.callbacks.manager import CallbackManager
 import threading
 import time 
 from flask_socketio import SocketIO, emit
-import eventlet
+import tempfile
 
 
 openai.api_key = os.environ['OPENAI_API_KEY']
@@ -43,6 +43,10 @@ qdrant_url_key = os.environ['QDRANT_URL']
 
 speech_key = os.environ['SPEECH_KEY']
 service_region = os.environ['SERVICE_REGION_KEY']
+
+s3 = boto3.client('s3')
+BUCKET_NAME = 'testunity1.0'  # S3バケット名を設定
+AWSreagion=os.environ['AWS_REGION_KEY']
 
 app = Flask(__name__)
 CORS(app)
@@ -88,25 +92,20 @@ message_queue = []  # クライアントのリスナーを追跡
 db_path = 'conversation_database.db'
 
 buffered_text = ""
-url_root = "https://selftalk.onrender.com"
 
 # AWS DynamoDBへの接続設定
 table = dynamodb.Table('maindatabase')
 
 def text_to_speech2(text):
-    output_filename = f"text2output_{datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}_{uuid.uuid4().hex}.wav"
-    output_dir = 'audio'  # 音声ファイルを保存するディレクトリ
-    output_path = os.path.join(output_dir, output_filename)  # 音声ファイルの保存パス
-
-    # ディレクトリが存在しない場合は作成
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    # 一時ファイルのパスを生成
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    output_filename = f"talkaudio/text2output_{datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}_{uuid.uuid4().hex}.wav"
+    file_path = temp_file.name
 
     speech_config = speechsdk.SpeechConfig(subscription=azure_speech_key, region=azure_service_region)
-    audio_config = speechsdk.audio.AudioOutputConfig(filename=output_path)
+    audio_config = speechsdk.audio.AudioOutputConfig(filename=file_path)
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
 
-    # SSMLを使用してテキストを音声に変換
     ssml_string = f"""<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis"
                     xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="ja-JP">
                     <voice name="ja-JP-DaichiNeural">
@@ -117,10 +116,20 @@ def text_to_speech2(text):
                   </speak>"""
     result = synthesizer.speak_ssml_async(ssml_string).get()
 
-    # ファイル削除のためのタイマーを設定（2分後に削除）
-    Timer(90, delete_file, args=[output_path]).start()
+    # 音声データを一時ファイルに書き込み
+    temp_file.close()
 
-    return result, output_filename
+    # 一時ファイルをS3にアップロード
+    with open(file_path, 'rb') as audio_file:
+        s3.put_object(Bucket=BUCKET_NAME, Key=output_filename, Body=audio_file)
+    
+    # アップロードが完了したら一時ファイルを削除
+    os.remove(file_path)
+    
+    # 正しいエンドポイントを反映したS3オブジェクトのURLを生成
+    audio_url = f"https://s3.{AWSreagion}.amazonaws.com/{BUCKET_NAME}/{output_filename}"
+
+    return result, audio_url
 
 def dummy_callback(token):
     global buffered_text
@@ -133,7 +142,7 @@ def dummy_callback(token):
         buffered_text = ""  # バッファをクリア
         result, output_filename = text_to_speech2(text)
         print("Message successfully added to queue.")
-        audio_url = url_root + '/audio/' + output_filename
+        audio_url =  output_filename
         socketio.emit('audio_url', {'url': audio_url})
         print("Message send")
 
@@ -223,17 +232,6 @@ def handle_messageuniv(data):
         logger.error(f"Error processing request: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-def delete_file(filename):
-    """指定されたファイルを削除する関数、ファイルが存在する場合のみ"""
-    if os.path.exists(filename):  # ファイルが存在するかチェック
-        try:
-            os.remove(filename)
-            print(f"Deleted file: {filename}")
-        except Exception as e:
-            print(f"Error deleting file: {filename}, {e}")
-    else:
-        print(f"File does not exist, no need to delete: {filename}")
-
 def get_latest_conversation(user_id):
     try:
         response = table2.query(
@@ -318,14 +316,9 @@ class MyCustomCallbackHandler(BaseCallbackHandler):
     def on_agent_finish(self, finish: AgentFinish, **kwargs: Any) -> Any:
         """Run on agent end."""
 
-@app.route('/audio/<filename>')
-def audio_file(filename):
-    """音声ファイルを提供するルート"""
-    return send_from_directory('audio', filename)
-
 @app.route('/')
 def index():
     return 'Server is running!'
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    socketio.run(app, host='0.0.0.0', port=8000, debug=True)
