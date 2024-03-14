@@ -88,7 +88,7 @@ message_queue = []  # クライアントのリスナーを追跡
 db_path = 'conversation_database.db'
 
 buffered_text = ""
-url_root = "http://127.0.0.1:8000"
+url_root = "https://selftalk.onrender.com"
 
 # AWS DynamoDBへの接続設定
 table = dynamodb.Table('maindatabase')
