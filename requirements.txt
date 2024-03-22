@@ -19,3 +19,4 @@ urllib3==1.26.16
 eventlet==0.35.2
 Flask-SocketIO==5.3.6
 gevent-websocket==0.10.1
+docx==0.2.4
